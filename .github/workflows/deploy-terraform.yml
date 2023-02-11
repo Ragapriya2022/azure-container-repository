@@ -1,0 +1,69 @@
+name: Deploy Azure using Terraform
+on: [push]
+
+jobs:
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -out main.tfplan
+
+      - name: Terraform Apply
+        run: terraform apply "main.tfplan"
+
+  build-and-deploy:
+    needs: deploy-infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      # checkout the repo
+      - name: "Checkout GitHub Action"
+        uses: actions/checkout@main
+
+      - name: "Login via Azure CLI"
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            registryId=$(az acr show --name terraformdockeracr --resource-group azure-container-rg --query id --output tsv)
+            MSYS_NO_PATHCONV=1 az role assignment create --assignee ${{ secrets.ARM_CLIENT_ID }} --scope $registryId --role AcrPush
+
+      - name: "Build and push image"
+        uses: azure/docker-login@v1
+        with:
+          login-server: terraformdockeracr.azurecr.io
+          username: ${{ secrets.ARM_CLIENT_ID }}
+          password: ${{ secrets.ARM_CLIENT_SECRET }}
+      - run: |
+          docker build . -t terraformdockeracr.azurecr.io/sampleapp:${{ github.sha }}
+          docker push terraformdockeracr.azurecr.io/sampleapp:${{ github.sha }}
+
+      - name: "Deploy to Azure Container Instances"
+        uses: "azure/aci-deploy@v1"
+        with:
+          resource-group: aazurecontainer_rs
+          dns-name-label: azure-container-rg${{ github.run_number }}
+          image: terraformdockeracr.azurecr.io/sampleapp:${{ github.sha }}
+          registry-login-server: terraformdockeracr.azurecr.io
+          registry-username: ${{ secrets.ARM_CLIENT_ID }}
+          registry-password: ${{ secrets.ARM_CLIENT_SECRET }}
+          name: containerRegistryraga
+          location: "West Europe"
